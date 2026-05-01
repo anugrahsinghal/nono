@@ -52,14 +52,14 @@ pub(crate) fn is_dangerous_env_var(key: &str) -> bool {
         || key.starts_with("OP_SESSION_")
 }
 
-/// Returns true if an environment variable matches the allow-list.
+/// Returns true if `key` matches any pattern in `patterns`.
 ///
 /// Supports exact names (`"PATH"`) and prefix patterns ending with `*`
 /// (`"AWS_*"` matches `AWS_REGION`, `AWS_SECRET_ACCESS_KEY`, etc.).
 /// A bare `"*"` matches everything. The `*` wildcard is only valid as a
-/// trailing suffix — patterns like `"A*B"` or `"*X"` are rejected.
-pub(crate) fn is_env_var_allowed(key: &str, allowed_env_vars: &[String]) -> bool {
-    for pattern in allowed_env_vars {
+/// trailing suffix — patterns like `"A*B"` or `"*X"` are skipped.
+fn matches_env_var_patterns(key: &str, patterns: &[String]) -> bool {
+    for pattern in patterns {
         if let Some(prefix) = pattern.strip_suffix('*') {
             if prefix.contains('*') {
                 continue;
@@ -72,6 +72,23 @@ pub(crate) fn is_env_var_allowed(key: &str, allowed_env_vars: &[String]) -> bool
         }
     }
     false
+}
+
+/// Returns true if an environment variable matches the allow-list.
+///
+/// Supports exact names (`"PATH"`) and prefix patterns ending with `*`
+/// (`"AWS_*"` matches `AWS_REGION`, `AWS_SECRET_ACCESS_KEY`, etc.).
+/// A bare `"*"` matches everything.
+pub(crate) fn is_env_var_allowed(key: &str, allowed_env_vars: &[String]) -> bool {
+    matches_env_var_patterns(key, allowed_env_vars)
+}
+
+/// Returns true if an environment variable matches the deny-list.
+///
+/// Uses the same pattern syntax as `is_env_var_allowed`: exact names and
+/// trailing-`*` prefix patterns.
+pub(crate) fn is_env_var_denied(key: &str, denied_env_vars: &[String]) -> bool {
+    matches_env_var_patterns(key, denied_env_vars)
 }
 
 /// Validates that all env var patterns use `*` only as a trailing suffix.
@@ -93,14 +110,6 @@ pub(crate) fn validate_env_var_patterns(patterns: &[String], field_name: &str) -
         }
     }
     None
-}
-
-/// Returns true if an environment variable matches the deny-list.
-///
-/// Uses the same pattern syntax as `is_env_var_allowed`: exact names and
-/// trailing-`*` prefix patterns.
-pub(crate) fn is_env_var_denied(key: &str, denied_env_vars: &[String]) -> bool {
-    is_env_var_allowed(key, denied_env_vars)
 }
 
 /// Decide whether an inherited env var should be dropped for sandbox execution.

@@ -110,7 +110,7 @@ Prefix patterns work the same as in `allow_vars` — only trailing `*` is suppor
 }
 ```
 
-This strips `GITHUB_TOKEN`, `GITHUB_ACTIONS`, any var starting with `ANTHROPIC_` or `OPENAI_`, etc. Patterns like `*_TOKEN` (leading wildcard) are **not** supported and are silently ignored.
+This strips `GITHUB_TOKEN`, `GITHUB_ACTIONS`, any var starting with `ANTHROPIC_` or `OPENAI_`, etc. Patterns like `*_TOKEN` (leading wildcard) are **not** supported — nono will print a warning and ignore them.
 
 **Precedence:** `deny_vars` wins over `allow_vars`. If a variable appears in both, it is stripped:
 
