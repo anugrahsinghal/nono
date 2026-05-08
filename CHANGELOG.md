@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.50.0] - 2026-05-08
+
+### Features
+
+- *(profile)* Support env:// URI in custom_credentials credential_key
+
+
+### Refactoring
+
+- *(cli)* Optimize ps command column width calculation
+
+- *(cli/ps)* Improve ps command display with dynamic columns
+
 ## [0.49.0] - 2026-05-07
 
 ### Bug Fixes
