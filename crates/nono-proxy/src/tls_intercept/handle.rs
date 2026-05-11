@@ -1,11 +1,15 @@
 //! CONNECT-intercept entry point.
 //!
-//! Terminates TLS from the agent, reads the inner HTTP request, selects
-//! the matching route (by endpoint rules when multiple routes share an
-//! upstream), and forwards via [`crate::forward::forward_request`].
+//! Terminates TLS from the agent, reads the inner HTTP/1.1 request, and
+//! dispatches it via [`crate::forward::forward_request`].
 //!
-//! Auth relies on the outer CONNECT `Proxy-Authorization`; inner requests
-//! are not required to carry a token. Every failure is hard-fail.
+//! Route selection for each inner request:
+//!   - **1 match** — inject that route's managed credential.
+//!   - **0 matches** — forward without credentials (passthrough).
+//!   - **2+ matches** — reject as ambiguous (403).
+//!
+//! Auth is validated on the outer CONNECT `Proxy-Authorization` only;
+//! inner requests are not required to carry a token.
 
 use crate::audit;
 use crate::config::InjectMode;
@@ -119,7 +123,8 @@ pub async fn handle_intercept_connect(stream: &mut TcpStream, ctx: InterceptCtx<
     Ok(())
 }
 
-/// Parse one inner HTTP/1.1 request, select the route, and forward upstream.
+/// Read one inner HTTP/1.1 request, select the matching route, inject
+/// credentials if matched, and forward upstream.
 async fn forward_inner_request<S>(tls_stream: &mut S, ctx: &InterceptCtx<'_>) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -159,9 +164,7 @@ where
     let (method, path, version) = parse_request_line(first_line)?;
     debug!("tls_intercept: inner request {} {}", method, path);
 
-    // Select the route for this request. When multiple routes share
-    // the same upstream, pick the one whose endpoint_rules match;
-    // fall back to a catch-all route (empty rules) if no rules match.
+    // Route selection: 1 match → cred, 0 → passthrough, 2+ → 403.
     let host_port = format!("{}:{}", ctx.host.to_lowercase(), ctx.port);
     let candidates = ctx.route_store.lookup_all_by_upstream(&host_port);
     if candidates.is_empty() {
@@ -173,7 +176,7 @@ where
         return Ok(());
     }
 
-    let mut matched: Option<(&str, &crate::route::LoadedRoute)> = None;
+    let mut matches: Vec<(&str, &crate::route::LoadedRoute)> = Vec::new();
     let mut catch_all: Option<(&str, &crate::route::LoadedRoute)> = None;
     for (prefix, route) in &candidates {
         if route.endpoint_rules.is_empty() {
@@ -181,75 +184,83 @@ where
                 catch_all = Some((prefix, route));
             }
         } else if route.endpoint_rules.is_allowed(&method, &path) {
-            matched = Some((prefix, route));
-            break;
+            matches.push((prefix, route));
         }
     }
-    let (service, route) = match matched.or(catch_all) {
-        Some(hit) => hit,
-        None => {
-            let reason = format!(
-                "endpoint denied: {} {} (no route's endpoint_rules matched)",
-                method, path
-            );
-            warn!("tls_intercept: {}", reason);
-            audit::log_denied(
-                ctx.audit_log,
-                audit::ProxyMode::ConnectIntercept,
-                &audit::EventContext {
-                    denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
-                    ..audit::EventContext::default()
-                },
-                ctx.host,
-                ctx.port,
-                &reason,
-            );
-            reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
-            return Ok(());
-        }
-    };
-    debug!(
-        "tls_intercept: selected route '{}' for {} {}",
-        service, method, path
-    );
 
-    let cred = ctx.credential_store.get(service);
-    let oauth2_route = ctx.credential_store.get_oauth2(service);
-
-    if route.missing_managed_credential(cred.is_some(), oauth2_route.is_some()) {
+    if matches.len() > 1 {
+        let names: Vec<_> = matches.iter().map(|(p, _)| *p).collect();
         let reason = format!(
-            "managed credential unavailable for route '{}': intercepted request requires proxy-supplied auth",
-            service
+            "ambiguous route: {} {} matched {} routes: {:?}. \
+             Narrow endpoint_rules so each request matches exactly one route.",
+            method,
+            path,
+            matches.len(),
+            names
         );
         warn!("tls_intercept: {}", reason);
         audit::log_denied(
             ctx.audit_log,
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
-                route_id: Some(service),
-                auth_mechanism: route.managed_auth_mechanism.clone(),
-                auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
-                managed_credential_active: Some(false),
-                injection_mode: route.managed_injection_mode.clone(),
-                denial_category: Some(
-                    nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
-                ),
+                denial_category: Some(nono::undo::NetworkAuditDenialCategory::EndpointPolicy),
+                ..audit::EventContext::default()
             },
             ctx.host,
             ctx.port,
             &reason,
         );
-        reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
+        reverse::send_error_generic(tls_stream, 403, "Forbidden").await?;
         return Ok(());
     }
 
-    // Endpoint filtering already happened during route selection above.
-    // Routes with non-empty endpoint_rules only matched if the inner
-    // request was allowed; catch-all routes (empty rules) allow everything.
+    // Exactly one match → inject credential. No match → passthrough.
+    let selected = matches.into_iter().next().or(catch_all);
+    let service: Option<&str> = selected.map(|(s, _)| s);
+    let route: Option<&crate::route::LoadedRoute> = selected.map(|(_, r)| r);
+    match service {
+        Some(svc) => debug!(
+            "tls_intercept: selected route '{}' for {} {}",
+            svc, method, path
+        ),
+        None => debug!(
+            "tls_intercept: no endpoint_rules matched {} {}, forwarding without credentials",
+            method, path
+        ),
+    }
 
-    // No inner-request auth check — the outer CONNECT Proxy-Authorization
-    // is sufficient. Any client-supplied auth header is stripped below so
-    // it doesn't leak upstream.
+    let cred = service.and_then(|s| ctx.credential_store.get(s));
+    let oauth2_route = service.and_then(|s| ctx.credential_store.get_oauth2(s));
+
+    if let Some(rt) = route {
+        if rt.missing_managed_credential(cred.is_some(), oauth2_route.is_some()) {
+            let svc = service.unwrap_or("unknown");
+            let reason = format!(
+                "managed credential unavailable for route '{}': intercepted request requires proxy-supplied auth",
+                svc
+            );
+            warn!("tls_intercept: {}", reason);
+            audit::log_denied(
+                ctx.audit_log,
+                audit::ProxyMode::ConnectIntercept,
+                &audit::EventContext {
+                    route_id: service,
+                    auth_mechanism: rt.managed_auth_mechanism.clone(),
+                    auth_outcome: Some(nono::undo::NetworkAuditAuthOutcome::Failed),
+                    managed_credential_active: Some(false),
+                    injection_mode: rt.managed_injection_mode.clone(),
+                    denial_category: Some(
+                        nono::undo::NetworkAuditDenialCategory::ManagedCredentialUnavailable,
+                    ),
+                },
+                ctx.host,
+                ctx.port,
+                &reason,
+            );
+            reverse::send_error_generic(tls_stream, 503, "Service Unavailable").await?;
+            return Ok(());
+        }
+    }
 
     // --- Path / credential transformation ---
     let transformed_path = if let Some(cred) = cred {
@@ -281,7 +292,7 @@ where
             ctx.audit_log,
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
-                route_id: Some(service),
+                route_id: service,
                 managed_credential_active: Some(cred.is_some() || oauth2_route.is_some()),
                 injection_mode: cred.map(|c| match c.inject_mode {
                     InjectMode::Header => nono::undo::NetworkAuditInjectionMode::Header,
@@ -337,7 +348,9 @@ where
     request.push_str("\r\n");
 
     // --- Forward via shared pipeline ---
-    let connector = route.tls_connector.as_ref().unwrap_or(ctx.tls_connector);
+    let connector = route
+        .and_then(|r| r.tls_connector.as_ref())
+        .unwrap_or(ctx.tls_connector);
     let upstream_spec = UpstreamSpec {
         scheme: UpstreamScheme::Https,
         host: ctx.host,
@@ -351,7 +364,7 @@ where
         log: ctx.audit_log,
         mode: audit::ProxyMode::ConnectIntercept,
         event_ctx: audit::EventContext {
-            route_id: Some(service),
+            route_id: service,
             auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
                 InjectMode::Header | InjectMode::BasicAuth => {
                     nono::undo::NetworkAuditAuthMechanism::PhantomHeader
@@ -387,7 +400,7 @@ where
             ctx.audit_log,
             audit::ProxyMode::ConnectIntercept,
             &audit::EventContext {
-                route_id: Some(service),
+                route_id: service,
                 auth_mechanism: cred.map(|c| match c.proxy_inject_mode {
                     InjectMode::Header | InjectMode::BasicAuth => {
                         nono::undo::NetworkAuditAuthMechanism::PhantomHeader

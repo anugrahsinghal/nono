@@ -264,7 +264,8 @@ impl RouteStore {
         })
     }
 
-    /// Return all routes whose upstream matches `host:port`.
+    /// Return all routes whose upstream matches `host:port`, sorted by
+    /// prefix for deterministic iteration.
     #[must_use]
     pub fn lookup_all_by_upstream(&self, host_port: &str) -> Vec<(&str, &LoadedRoute)> {
         let normalised = host_port.to_lowercase();
@@ -362,17 +363,9 @@ fn read_pem_file(path: &std::path::Path, label: &str) -> Result<Zeroizing<Vec<u8
         })
 }
 
-/// Build a `TlsConnector` with optional custom CA and optional client certificate.
+/// Root cert store combining webpki roots with the OS trust store.
 ///
-/// - `ca_path`: PEM-encoded CA certificate file to trust in addition to system roots.
-///   Required for upstreams with self-signed or private CA certificates.
-/// - `client_cert_path`: PEM-encoded client certificate for mTLS. Must be paired with `client_key_path`.
-/// - `client_key_path`: PEM-encoded private key matching `client_cert_path`.
-///
-/// At least one of the three parameters must be `Some`. Returns an error if any
-/// file cannot be read, contains invalid PEM, or the TLS configuration fails.
-/// Build a root cert store with webpki roots + native system CAs.
-/// Called once at startup and shared across per-route connectors.
+/// Loaded once at startup and cloned into each per-route connector.
 fn build_base_root_store() -> rustls::RootCertStore {
     let mut store = rustls::RootCertStore::empty();
     store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -385,6 +378,8 @@ fn build_base_root_store() -> rustls::RootCertStore {
     store
 }
 
+/// Build a per-route `TlsConnector`, optionally adding a custom CA
+/// and/or mTLS client certificate on top of `base_root_store`.
 fn build_tls_connector(
     base_root_store: &rustls::RootCertStore,
     ca_path: Option<&str>,
@@ -950,6 +945,126 @@ mod tests {
         assert!(store.has_intercept_route("github.com:443"));
         assert!(store.is_route_upstream("github.com:443"));
         assert!(store.lookup_all_by_upstream("other.com:443").is_empty());
+    }
+
+    /// Models a real multi-org GitHub profile. Mirrors the selection
+    /// loop in `tls_intercept::handle`:
+    ///   1 match  → inject that route's credential
+    ///   0 matches → passthrough (no credential injected)
+    ///   2+ matches → ambiguous (hard-deny 403)
+    #[test]
+    fn test_route_selection_multi_org_profile() {
+        // Helper to build a route with the given prefix and endpoint path.
+        fn gh_route(prefix: &str, env: &str, path: &str) -> RouteConfig {
+            RouteConfig {
+                prefix: prefix.to_string(),
+                upstream: "https://github.com".to_string(),
+                credential_key: Some(format!("env://{env}")),
+                inject_mode: Default::default(),
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                env_var: Some(env.to_string()),
+                endpoint_rules: vec![crate::config::EndpointRule {
+                    method: "*".to_string(),
+                    path: path.to_string(),
+                }],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+                oauth2: None,
+            }
+        }
+
+        #[derive(Debug, PartialEq)]
+        enum Selection<'a> {
+            Route(&'a str),
+            Passthrough,
+            Ambiguous(Vec<&'a str>),
+        }
+
+        fn select<'a>(
+            candidates: &'a [(&'a str, &'a LoadedRoute)],
+            method: &str,
+            path: &str,
+        ) -> Selection<'a> {
+            let mut matches: Vec<&str> = Vec::new();
+            let mut catch_all: Option<&str> = None;
+            for (prefix, route) in candidates {
+                if route.endpoint_rules.is_empty() {
+                    if catch_all.is_none() {
+                        catch_all = Some(*prefix);
+                    }
+                } else if route.endpoint_rules.is_allowed(method, path) {
+                    matches.push(prefix);
+                }
+            }
+            if matches.len() > 1 {
+                Selection::Ambiguous(matches)
+            } else if let Some(svc) = matches.into_iter().next().or(catch_all) {
+                Selection::Route(svc)
+            } else {
+                Selection::Passthrough
+            }
+        }
+
+        // --- Profile: two org-scoped routes, no catch-all ---
+        let routes = vec![
+            gh_route("github_https_org_a", "GH_TOKEN_A", "/org-a/**"),
+            gh_route("github_https_org_b", "GH_TOKEN_B", "/org-b/**"),
+        ];
+        let store = RouteStore::load(&routes).unwrap();
+        let candidates = store.lookup_all_by_upstream("github.com:443");
+        assert_eq!(candidates.len(), 2);
+
+        // Private org-a repo → org-a credential
+        assert_eq!(
+            select(&candidates, "GET", "/org-a/repo.git/info/refs"),
+            Selection::Route("github_https_org_a")
+        );
+        // Private org-b repo → org-b credential
+        assert_eq!(
+            select(&candidates, "GET", "/org-b/repo.git/info/refs"),
+            Selection::Route("github_https_org_b")
+        );
+        // Public repo (e.g. always-further/nono) → passthrough, no cred
+        assert_eq!(
+            select(&candidates, "GET", "/always-further/nono.git/info/refs"),
+            Selection::Passthrough
+        );
+        // POST to public repo → also passthrough
+        assert_eq!(
+            select(
+                &candidates,
+                "POST",
+                "/always-further/nono.git/git-upload-pack"
+            ),
+            Selection::Passthrough
+        );
+
+        // --- Adding a /** catch-all would cause ambiguity ---
+        let routes_with_catchall = vec![
+            gh_route("github_https_org_a", "GH_TOKEN_A", "/org-a/**"),
+            gh_route("github_https_org_b", "GH_TOKEN_B", "/org-b/**"),
+            gh_route("github_https_all", "GH_TOKEN_A", "/**"),
+        ];
+        let store2 = RouteStore::load(&routes_with_catchall).unwrap();
+        let candidates2 = store2.lookup_all_by_upstream("github.com:443");
+        assert_eq!(candidates2.len(), 3);
+
+        // org-a request now matches BOTH org_a AND the /** catch-all → ambiguous
+        assert_eq!(
+            select(&candidates2, "GET", "/org-a/repo.git/info/refs"),
+            Selection::Ambiguous(vec!["github_https_all", "github_https_org_a"])
+        );
+        // Public repo matches only the /** catch-all → 1 match, ok
+        assert_eq!(
+            select(&candidates2, "GET", "/always-further/nono.git/info/refs"),
+            Selection::Route("github_https_all")
+        );
     }
 
     /// Self-signed CA for testing. Generated with:
