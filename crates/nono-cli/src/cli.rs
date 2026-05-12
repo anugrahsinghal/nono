@@ -558,6 +558,8 @@ IN-BAND DETACH:
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
   nono update
   nono update always-further/claude
+  nono update --dry-run
+  nono update --force                          # also update pinned packs
 ")]
     Update(UpdateArgs),
 
@@ -720,7 +722,11 @@ pub struct UpdateArgs {
     )]
     pub registry: Option<String>,
 
-    /// Accept signer changes
+    /// Show what would be updated without making changes
+    #[arg(long, help_heading = "OPTIONS")]
+    pub dry_run: bool,
+
+    /// Update pinned packs and accept signer changes
     #[arg(long, help_heading = "OPTIONS")]
     pub force: bool,
 
