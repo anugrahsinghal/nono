@@ -530,23 +530,20 @@ pub fn execute_supervised(
                 // Create a shim `open` script that delegates to nono open-url-helper.
                 // The npm `open` package spawns `open <url>` on macOS; by placing our
                 // shim earlier in PATH, we intercept the call.
-                if let Some(fd) = child_sock_fd {
-                    if let Some(shim) = create_open_shim(&nono_exe, fd) {
-                        // Prepend shim dir to PATH and also set BROWSER for any tool
-                        // that does respect it.
-                        let current_path = std::env::var("PATH").unwrap_or_default();
-                        let new_path = format!("PATH={}:{current_path}", shim.dir.path().display());
-                        if let Ok(cstr) = CString::new(new_path) {
-                            // Remove existing PATH from env_c, then add our modified one
-                            env_c.retain(|c| !c.as_bytes().starts_with(b"PATH="));
-                            env_c.push(cstr);
-                        }
-                        let browser_cmd = format!("BROWSER={}", shim.launcher.display());
-                        if let Ok(cstr) = CString::new(browser_cmd) {
-                            env_c.push(cstr);
-                        }
-                        browser_shim = Some(shim);
+                if let Some(fd) = child_sock_fd
+                    && let Some(shim) = create_open_shim(&nono_exe, fd)
+                {
+                    let current_path = std::env::var("PATH").unwrap_or_default();
+                    let new_path = format!("PATH={}:{current_path}", shim.dir.path().display());
+                    if let Ok(cstr) = CString::new(new_path) {
+                        env_c.retain(|c| !c.as_bytes().starts_with(b"PATH="));
+                        env_c.push(cstr);
                     }
+                    let browser_cmd = format!("BROWSER={}", shim.launcher.display());
+                    if let Ok(cstr) = CString::new(browser_cmd) {
+                        env_c.push(cstr);
+                    }
+                    browser_shim = Some(shim);
                 }
             }
         }
@@ -1975,17 +1972,17 @@ fn run_supervisor_loop(
                 }
             }
 
-            if let Some(ref mut p) = pty {
-                if !handle_pty_poll_events(
+            if let Some(ref mut p) = pty
+                && !handle_pty_poll_events(
                     p,
                     pfds[1].revents,
                     pfds[2].revents,
                     pfds[3].revents,
                     pfds[4].revents,
                     "supervisor loop",
-                ) {
-                    break;
-                }
+                )
+            {
+                break;
             }
         } else if ret < 0 {
             let err = std::io::Error::last_os_error();
@@ -1996,10 +1993,10 @@ fn run_supervisor_loop(
         }
 
         let pause_requested = drain_pause_pipe();
-        if let Some(ref mut p) = pty {
-            if pause_requested {
-                p.sync_current_terminal_winsize();
-            }
+        if let Some(ref mut p) = pty
+            && pause_requested
+        {
+            p.sync_current_terminal_winsize();
         }
         let in_band_detach_requested = pty.as_mut().is_some_and(|p| p.take_detach_request());
         handle_pty_detach_request(

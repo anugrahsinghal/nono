@@ -812,10 +812,10 @@ fn parse_nettop_line(line: &str, listening_ports: &HashSet<u16>) -> Option<Netwo
         // than an outbound connection. If the local port matches a known
         // listening port, this is an accepted client connection — the remote
         // address is the client, not a server we're connecting to.
-        if let Some((_, local_port)) = parse_nettop_endpoint(local_part, is_ipv6) {
-            if listening_ports.contains(&local_port) {
-                return None;
-            }
+        if let Some((_, local_port)) = parse_nettop_endpoint(local_part, is_ipv6)
+            && listening_ports.contains(&local_port)
+        {
+            return None;
         }
 
         // Outbound connection — extract remote address and port

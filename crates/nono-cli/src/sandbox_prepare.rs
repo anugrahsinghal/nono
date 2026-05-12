@@ -235,10 +235,10 @@ fn load_claude_oauth_state_from_raw_sources(
     keychain_raw: Option<&str>,
     file_raw: Option<(&str, &str)>,
 ) -> std::result::Result<Option<ClaudeOauthState>, String> {
-    if let Some(raw) = keychain_raw {
-        if let Some(oauth) = parse_claude_oauth_state_json(raw, "Claude OAuth keychain JSON")? {
-            return Ok(Some(oauth));
-        }
+    if let Some(raw) = keychain_raw
+        && let Some(oauth) = parse_claude_oauth_state_json(raw, "Claude OAuth keychain JSON")?
+    {
+        return Ok(Some(oauth));
     }
 
     if let Some((raw, source_label)) = file_raw {
@@ -1138,19 +1138,19 @@ pub(crate) fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<Prepar
 
     // Apply raw Seatbelt rules from the profile (macOS only).
     #[cfg(target_os = "macos")]
-    if let Some(ref profile) = loaded_profile {
-        if !profile.unsafe_macos_seatbelt_rules.is_empty() {
-            info!(
-                "Profile uses {} raw Seatbelt rule(s) via unsafe_macos_seatbelt_rules — review carefully",
-                profile.unsafe_macos_seatbelt_rules.len()
-            );
-            for rule in &profile.unsafe_macos_seatbelt_rules {
-                caps.add_platform_rule(rule).map_err(|e| {
-                    NonoError::ConfigParse(format!(
-                        "unsafe_macos_seatbelt_rules: invalid rule {rule:?}: {e}"
-                    ))
-                })?;
-            }
+    if let Some(ref profile) = loaded_profile
+        && !profile.unsafe_macos_seatbelt_rules.is_empty()
+    {
+        info!(
+            "Profile uses {} raw Seatbelt rule(s) via unsafe_macos_seatbelt_rules — review carefully",
+            profile.unsafe_macos_seatbelt_rules.len()
+        );
+        for rule in &profile.unsafe_macos_seatbelt_rules {
+            caps.add_platform_rule(rule).map_err(|e| {
+                NonoError::ConfigParse(format!(
+                    "unsafe_macos_seatbelt_rules: invalid rule {rule:?}: {e}"
+                ))
+            })?;
         }
     }
 
