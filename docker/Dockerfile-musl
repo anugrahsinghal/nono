@@ -12,7 +12,7 @@
 # Build with:
 #   docker buildx build -f docker/Dockerfile-musl -t nono-musl .
 
-FROM rust:alpine AS builder
+FROM rust:alpine3.21 AS builder
 
 # cmake + clang — required by aws-lc-rs to compile AWS-LC crypto library
 # perl + make   — required by ring's build script
@@ -36,7 +36,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p nono-cli --no-default-features && \
     cp target/release/nono /usr/local/bin/nono
 
-FROM alpine:3
+FROM alpine:3.21
 
 LABEL org.opencontainers.image.source="https://github.com/always-further/nono"
 LABEL org.opencontainers.image.description="Capability-based sandboxing for untrusted AI agents (musl, statically linked)"
