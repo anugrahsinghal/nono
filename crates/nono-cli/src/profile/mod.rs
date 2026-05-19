@@ -1503,6 +1503,11 @@ pub struct Profile {
     /// Each entry is a `<namespace>/<name>` reference to an installed pack.
     #[serde(default)]
     pub packs: Vec<String>,
+    /// Binary path or command name to run when no trailing `-- <command>` is given.
+    /// Resolved via `PATH` lookup or canonicalized if absolute. Only honoured
+    /// for user-authored profiles (ignored for pack and built-in profiles).
+    #[serde(default)]
+    pub binary: Option<String>,
     /// Extra arguments appended to the child command at launch.
     /// Supports variable expansion (e.g. `$NONO_PACKAGES`).
     #[serde(default)]
@@ -1571,6 +1576,8 @@ struct ProfileDeserialize {
     skipdirs: Vec<String>,
     #[serde(default)]
     packs: Vec<String>,
+    #[serde(default)]
+    binary: Option<String>,
     /// ALIAS(canonical="command_args", introduced="v0.0.0", remove_by="indefinite", issue="N/A")
     #[serde(default)]
     #[serde(alias = "brokered_commands")]
@@ -1607,6 +1614,7 @@ impl From<ProfileDeserialize> for Profile {
             interactive: raw.interactive,
             skipdirs: raw.skipdirs,
             packs: raw.packs,
+            binary: raw.binary,
             command_args: raw.command_args,
             unsafe_macos_seatbelt_rules: raw.unsafe_macos_seatbelt_rules,
         };
@@ -2575,6 +2583,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
         interactive: base.interactive || child.interactive,
         skipdirs: dedup_append(&base.skipdirs, &child.skipdirs),
         packs: dedup_append(&base.packs, &child.packs),
+        binary: child.binary.or(base.binary),
         command_args: dedup_append(&base.command_args, &child.command_args),
         unsafe_macos_seatbelt_rules: dedup_append(
             &base.unsafe_macos_seatbelt_rules,
@@ -4417,6 +4426,7 @@ mod tests {
             interactive: false,
             skipdirs: vec!["vendor".to_string()],
             packs: vec![],
+            binary: None,
             command_args: vec![],
             unsafe_macos_seatbelt_rules: vec![],
         }
@@ -4495,6 +4505,7 @@ mod tests {
             interactive: false,
             skipdirs: vec!["dist".to_string()],
             packs: vec![],
+            binary: None,
             command_args: vec![],
             unsafe_macos_seatbelt_rules: vec![],
         }
@@ -6432,6 +6443,44 @@ mod tests {
         assert!(
             resolved.extension().and_then(|e| e.to_str()) == Some("jsonc"),
             "should prefer .jsonc: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn profile_binary_field_parses_and_inherits() {
+        let base = br#"{
+            "meta": { "name": "base" },
+            "binary": "/usr/bin/base-agent"
+        }"#;
+        let base_profile = parse_profile_bytes(base).expect("parse base");
+        assert_eq!(base_profile.binary.as_deref(), Some("/usr/bin/base-agent"));
+
+        let child = br#"{
+            "meta": { "name": "child" },
+            "binary": "/opt/child-agent"
+        }"#;
+        let child_profile = parse_profile_bytes(child).expect("parse child");
+        assert_eq!(child_profile.binary.as_deref(), Some("/opt/child-agent"));
+
+        let merged = merge_profiles(base_profile, child_profile);
+        assert_eq!(
+            merged.binary.as_deref(),
+            Some("/opt/child-agent"),
+            "child binary should override base"
+        );
+
+        let no_binary = br#"{ "meta": { "name": "no-bin" } }"#;
+        let no_bin_profile = parse_profile_bytes(no_binary).expect("parse no-binary");
+        assert!(no_bin_profile.binary.is_none());
+
+        let base2 =
+            parse_profile_bytes(br#"{ "meta": { "name": "b2" }, "binary": "/usr/bin/inherited" }"#)
+                .expect("parse");
+        let merged2 = merge_profiles(base2, no_bin_profile);
+        assert_eq!(
+            merged2.binary.as_deref(),
+            Some("/usr/bin/inherited"),
+            "child without binary should inherit from base"
         );
     }
 }
