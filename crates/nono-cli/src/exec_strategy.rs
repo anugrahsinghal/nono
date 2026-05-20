@@ -1279,7 +1279,8 @@ pub fn execute_supervised(
                     .with_error_observation(error_observation)
                     .with_current_dir(config.current_dir)
                     .with_session_id(diag_session_id)
-                    .with_policy_explanations(policy_explanations);
+                    .with_policy_explanations(policy_explanations)
+                    .with_suppressed_paths(config.ignored_denial_paths);
                 if let Some(program) = config.command.first() {
                     formatter = formatter.with_command(nono::diagnostic::CommandContext {
                         program: program.clone(),
