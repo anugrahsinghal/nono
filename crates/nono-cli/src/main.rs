@@ -22,6 +22,7 @@ mod deprecated_schema;
 mod deprecation_warnings;
 mod exec_strategy;
 mod execution_runtime;
+#[cfg(unix)]
 mod hook_runtime;
 mod instruction_deny;
 mod launch_runtime;

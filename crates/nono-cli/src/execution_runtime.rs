@@ -1,4 +1,5 @@
 use crate::audit_attestation::prepare_audit_signer;
+#[cfg(unix)]
 use crate::hook_runtime;
 use crate::launch_runtime::{LaunchPlan, select_threading_context};
 use crate::proxy_runtime::start_proxy_runtime;
@@ -257,7 +258,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 .unwrap_or_else(session::generate_session_id)
         });
 
-    // ---- Before-hook execution ----
+    // ---- Before-hook execution (Unix-only) ----
+    #[cfg(unix)]
     let hook_env_vars_owned: Vec<(String, String)> = flags
         .session_hooks
         .before
@@ -282,6 +284,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
             }
         })
         .unwrap_or_default();
+    #[cfg(not(unix))]
+    let hook_env_vars_owned: Vec<(String, String)> = Vec::new();
 
     let mut env_vars: Vec<(&str, &str)> = loaded_secrets
         .iter()
@@ -414,7 +418,8 @@ pub(crate) fn execute_sandboxed(plan: LaunchPlan) -> Result<()> {
                 silent: flags.silent,
             })?;
 
-            // ---- After-hook execution ----
+            // ---- After-hook execution (Unix-only) ----
+            #[cfg(unix)]
             if let (Some(after), Some(session_id)) = (
                 flags.session_hooks.after.as_ref(),
                 hook_session_id.as_deref(),

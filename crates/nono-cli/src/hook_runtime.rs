@@ -3,6 +3,10 @@
 //! Handles execution of before/after hooks for sandbox sessions.
 //! All hooks run outside the sandbox with host privileges.
 //!
+//! Unix-only: relies on POSIX uid/mode metadata, `pre_exec`, and process
+//! group signalling. Gated by `#[cfg(unix)]` at the module declaration in
+//! `main.rs`.
+//!
 //! # Security
 //!
 //! - Script paths are validated before every execution
@@ -14,9 +18,7 @@
 
 use crate::{exec_strategy, profile, session};
 use nono::{NonoError, Result};
-#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -186,7 +188,6 @@ fn build_hook_command(
 
     // SAFETY: setpgid(0,0) places the child in its own process group for
     // clean timeout killing. POSIX guarantees setpgid is async-signal-safe.
-    #[cfg(unix)]
     unsafe {
         cmd.pre_exec(|| {
             let _ =
@@ -294,26 +295,14 @@ impl EnvFileGuard {
             ))
         })?;
 
-        #[cfg(unix)]
-        {
-            let _ =
-                std::fs::set_permissions(&session_env_dir, std::fs::Permissions::from_mode(0o700));
-        }
+        let _ = std::fs::set_permissions(&session_env_dir, std::fs::Permissions::from_mode(0o700));
 
         let path = session_env_dir.join("env");
 
-        #[cfg(unix)]
         std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
-            .open(&path)
-            .map_err(|e| NonoError::ConfigParse(format!("Failed to create env file: {e}")))?;
-
-        #[cfg(not(unix))]
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
             .open(&path)
             .map_err(|e| NonoError::ConfigParse(format!("Failed to create env file: {e}")))?;
 
