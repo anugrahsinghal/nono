@@ -1669,7 +1669,7 @@ pub fn load_profile_extends(name_or_path: &str) -> Option<Vec<String>> {
     let _suppress = crate::deprecation_warnings::WarningSuppressionGuard::begin();
 
     // Direct file path
-    if name_or_path.contains('/') || name_or_path.ends_with(".json") {
+    if is_file_path_ref(name_or_path) {
         return parse_profile_file(Path::new(name_or_path))
             .ok()
             .and_then(|p| p.extends);
@@ -1818,10 +1818,7 @@ fn load_profile_inner(name_or_path: &str) -> Result<Option<Profile>> {
     if is_registry_ref(name_or_path) {
         return load_registry_profile(name_or_path).map(Some);
     }
-    if name_or_path.contains('/')
-        || name_or_path.ends_with(".json")
-        || name_or_path.ends_with(".jsonc")
-    {
+    if is_file_path_ref(name_or_path) {
         return load_profile_from_path(Path::new(name_or_path)).map(Some);
     }
     if !is_valid_profile_name(name_or_path) {
@@ -2007,6 +2004,13 @@ pub(crate) fn is_registry_ref(s: &str) -> bool {
         && !s.starts_with('/')
         && !s.ends_with(".json")
         && parts.iter().all(|p| !p.is_empty())
+}
+
+/// Returns true if the profile name looks like a direct filesystem path
+/// (contains path separators or has a recognized profile file extension)
+/// rather than a simple profile name or registry reference.
+pub(crate) fn is_file_path_ref(s: &str) -> bool {
+    !is_registry_ref(s) && (s.contains('/') || s.ends_with(".json") || s.ends_with(".jsonc"))
 }
 
 /// Load a profile from a registry pack. If the pack isn't installed locally,
