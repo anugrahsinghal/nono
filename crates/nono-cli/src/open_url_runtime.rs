@@ -2,30 +2,22 @@ use crate::cli::OpenUrlHelperArgs;
 use nono::supervisor::types::{SupervisorMessage, SupervisorResponse};
 use nono::supervisor::{SupervisorSocket, UrlOpenRequest};
 use nono::{NonoError, Result};
-use std::os::unix::io::FromRawFd;
-use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 /// Internal helper invoked via BROWSER env var (Linux) or PATH shim (macOS).
 ///
-/// Reads the supervisor socket fd from `NONO_SUPERVISOR_FD`, sends an
-/// `OpenUrl` IPC message, waits for the response, and exits with the
-/// appropriate exit code.
+/// Reads the supervisor socket path from `NONO_SUPERVISOR_PATH`, connects to
+/// the supervisor's named socket, sends an `OpenUrl` IPC message, waits for
+/// the response, and exits with the appropriate exit code.
 pub(crate) fn run_open_url_helper(args: OpenUrlHelperArgs) -> Result<()> {
-    let fd_str = std::env::var("NONO_SUPERVISOR_FD").map_err(|_| {
+    let socket_path = std::env::var("NONO_SUPERVISOR_PATH").map_err(|_| {
         NonoError::SandboxInit(
-            "NONO_SUPERVISOR_FD not set. open-url-helper must be invoked inside a nono sandbox."
+            "NONO_SUPERVISOR_PATH not set. open-url-helper must be invoked inside a nono sandbox."
                 .to_string(),
         )
     })?;
 
-    let fd: i32 = fd_str.parse().map_err(|_| {
-        NonoError::SandboxInit(format!("Invalid NONO_SUPERVISOR_FD value: {fd_str}"))
-    })?;
-
-    // SAFETY: The fd was inherited from the parent process via fork+exec.
-    // It is a valid Unix domain socket created by the supervisor.
-    let stream = unsafe { UnixStream::from(std::os::unix::io::OwnedFd::from_raw_fd(fd)) };
-    let mut socket = SupervisorSocket::from_stream(stream);
+    let mut socket = SupervisorSocket::connect(Path::new(&socket_path))?;
 
     let request = UrlOpenRequest {
         request_id: format!("url-{}", std::process::id()),
