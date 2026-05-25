@@ -586,6 +586,12 @@ impl SupervisorListener {
             }
         };
 
+        stream.set_nonblocking(false).map_err(|e| {
+            NonoError::SandboxInit(format!(
+                "Failed to set accepted connection to blocking mode: {e}"
+            ))
+        })?;
+
         let peer = peer_credentials(stream.as_raw_fd())?;
         // SAFETY: getuid() is always safe to call.
         let our_uid = unsafe { libc::getuid() };
