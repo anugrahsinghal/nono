@@ -569,8 +569,10 @@ impl SupervisorListener {
     /// Accept a connection from the listener.
     ///
     /// Returns `None` if no connection is pending (non-blocking).
-    /// On success, validates peer credentials (UID must match current user)
-    /// and returns a `SupervisorSocket` ready for one request/response cycle.
+    /// On success, validates peer credentials (UID must match current user),
+    /// sets a read timeout to prevent a malicious client from stalling the
+    /// supervisor poll loop, and returns a `SupervisorSocket` ready for one
+    /// request/response cycle.
     pub fn accept(&self) -> Result<Option<SupervisorSocket>> {
         let (stream, _addr) = match self.listener.accept() {
             Ok(conn) => conn,
@@ -591,6 +593,14 @@ impl SupervisorListener {
                 peer.uid, our_uid
             )));
         }
+
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| {
+                NonoError::SandboxInit(format!(
+                    "Failed to set read timeout on accepted connection: {e}"
+                ))
+            })?;
 
         Ok(Some(SupervisorSocket {
             stream,
