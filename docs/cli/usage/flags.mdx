@@ -548,17 +548,32 @@ Without `--proxy-port`, nono uses an OS-assigned ephemeral port and sets environ
 nono run --allow-cwd --credential github --trust-proxy-ca -- gh api /user
 ```
 
-The CA is persisted in macOS Keychain and shared across sessions. It regenerates automatically every 24 hours:
+The CA is persisted in macOS Keychain and shared across sessions. It regenerates automatically when expired (default: 1 day, configurable via `--proxy-ca-validity`):
 
-- **First run of the day**: Generates a new ECDSA P-256 CA, stores it in Keychain, and adds it to the user trust store (one biometric/password prompt)
+- **First run**: Generates a new ECDSA P-256 CA, stores it in Keychain, and adds it to the user trust store (one biometric/password prompt)
 - **Subsequent runs**: Loads from Keychain with zero prompts
-- **After 24h**: Removes the expired CA and regenerates (one prompt)
+- **After expiry**: Removes the expired CA and regenerates
 
 <Note>
 This flag has no effect without `--credential` (or another TLS-intercepting route). If no credential routes are configured, nono warns and skips CA generation.
 </Note>
 
 Environment variable: `NONO_TRUST_PROXY_CA=1`
+
+#### `--proxy-ca-validity`
+
+Set the ephemeral proxy CA certificate validity in days (1–365, default: 1). Leaf certificates minted for intercepted hosts share the same expiry as the CA.
+
+```bash
+# CA valid for 7 days (useful for long-running sessions)
+nono run --credential github --proxy-ca-validity 7 -- gh api /user
+```
+
+<Note>
+When used with `--trust-proxy-ca`, the validity only applies when generating a new CA. An existing Keychain CA that is still valid will be reused regardless of this setting.
+</Note>
+
+Environment variable: `NONO_PROXY_CA_VALIDITY=<days>`
 
 #### `--listen-port`
 

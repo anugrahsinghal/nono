@@ -1,7 +1,7 @@
 //! macOS system trust store integration for nono's proxy CA.
 //!
 //! Persists the CA private key in macOS Keychain and the public cert in the
-//! user trust store via Security.framework. Regenerates when expired (24h).
+//! user trust store via Security.framework. Regenerates when expired.
 //!
 //! This enables Go CLI tools (`gh`, `terraform`, etc.) that ignore
 //! `SSL_CERT_FILE` and only use `com.apple.trustd` for TLS verification.
@@ -12,7 +12,7 @@ use security_framework::certificate::SecCertificate;
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework::passwords;
 use security_framework::trust_settings::{Domain, TrustSettings, TrustSettingsForCertificate};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
 use x509_parser::pem::parse_x509_pem;
 use zeroize::Zeroizing;
@@ -34,8 +34,8 @@ const KEYCHAIN_ACCOUNT: &str = "ca-bundle";
 /// cancelled the auth prompt or setup failed (fallback to ephemeral CA).
 ///
 /// All logging happens internally — the caller just checks the Option.
-pub(crate) fn load_or_generate_proxy_ca() -> Option<PreloadedCa> {
-    match try_ensure_trusted_ca() {
+pub(crate) fn load_or_generate_proxy_ca(validity: Duration) -> Option<PreloadedCa> {
+    match try_ensure_trusted_ca(validity) {
         Ok(Some(ca)) => Some(ca),
         Ok(None) => None,
         Err(e) => {
@@ -45,14 +45,14 @@ pub(crate) fn load_or_generate_proxy_ca() -> Option<PreloadedCa> {
     }
 }
 
-fn try_ensure_trusted_ca() -> Result<Option<PreloadedCa>> {
+fn try_ensure_trusted_ca(validity: Duration) -> Result<Option<PreloadedCa>> {
     match load_existing_ca()? {
         Some((key_der, cert_pem)) => {
             if !cert_pem_is_valid(&cert_pem)? {
                 debug!("stored proxy CA has expired; regenerating");
                 remove_cert_from_keychain(&cert_pem);
                 delete_existing_ca();
-                return generate_and_trust_new_ca();
+                return generate_and_trust_new_ca(validity);
             }
 
             let cert_der = pem_to_der(&cert_pem)?;
@@ -83,7 +83,7 @@ fn try_ensure_trusted_ca() -> Result<Option<PreloadedCa>> {
         }
         None => {
             debug!("no existing proxy CA in Keychain; generating new one");
-            generate_and_trust_new_ca()
+            generate_and_trust_new_ca(validity)
         }
     }
 }
@@ -100,9 +100,10 @@ fn load_existing_ca() -> Result<Option<(Zeroizing<Vec<u8>>, String)>> {
         .map_err(|e| NonoError::SandboxInit(format!("{e}")))
 }
 
-fn generate_and_trust_new_ca() -> Result<Option<PreloadedCa>> {
-    let ca = nono_proxy::tls_intercept::ca::EphemeralCa::generate_with_cn("nono-proxy-ca")
-        .map_err(|e| NonoError::SandboxInit(format!("failed to generate CA: {e}")))?;
+fn generate_and_trust_new_ca(validity: Duration) -> Result<Option<PreloadedCa>> {
+    let ca =
+        nono_proxy::tls_intercept::ca::EphemeralCa::generate_with_cn("nono-proxy-ca", validity)
+            .map_err(|e| NonoError::SandboxInit(format!("failed to generate CA: {e}")))?;
     let key_der = Zeroizing::new(ca.key_der().to_vec());
     let cert_pem = ca.cert_pem().to_string();
 
@@ -247,7 +248,11 @@ mod tests {
     use nono_proxy::tls_intercept::ca::EphemeralCa;
 
     fn generate_test_ca() -> EphemeralCa {
-        EphemeralCa::generate_with_cn("nono-proxy-ca").unwrap()
+        EphemeralCa::generate_with_cn(
+            "nono-proxy-ca",
+            nono_proxy::tls_intercept::ca::CA_VALIDITY_DEFAULT,
+        )
+        .unwrap()
     }
 
     #[test]

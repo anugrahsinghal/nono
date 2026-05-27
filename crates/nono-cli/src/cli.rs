@@ -1237,6 +1237,17 @@ pub struct SandboxArgs {
     #[arg(long, env = "NONO_TRUST_PROXY_CA", help_heading = "NETWORK")]
     pub trust_proxy_ca: bool,
 
+    /// Proxy CA certificate validity in days (1–365, default: 1).
+    /// Controls how long the ephemeral CA (and its leaf certificates) remain valid.
+    #[arg(
+        long,
+        value_name = "DAYS",
+        env = "NONO_PROXY_CA_VALIDITY",
+        value_parser = clap::value_parser!(u32).range(1..=365),
+        help_heading = "NETWORK"
+    )]
+    pub proxy_ca_validity: Option<u32>,
+
     // ── Credentials ──────────────────────────────────────────────────────
     /// Inject credentials via reverse proxy for a service (repeatable)
     /// ALIAS(canonical="--credential", introduced="v0.0.0", remove_by="indefinite", issue="#143")
@@ -1594,6 +1605,7 @@ impl From<WrapSandboxArgs> for SandboxArgs {
             proxy_port: None,
             #[cfg(target_os = "macos")]
             trust_proxy_ca: false,
+            proxy_ca_validity: None,
             proxy_credential: Vec::new(),
             allow_endpoint: Vec::new(),
             env_credential: args.env_credential,

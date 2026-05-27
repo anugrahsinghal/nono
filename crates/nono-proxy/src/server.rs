@@ -491,7 +491,10 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
             let ca_result = if let Some(ref preloaded) = config.preloaded_ca {
                 EphemeralCa::from_existing(&preloaded.key_der, &preloaded.cert_pem)
             } else {
-                EphemeralCa::generate()
+                let validity = config
+                    .ca_validity
+                    .unwrap_or(crate::tls_intercept::ca::CA_VALIDITY_DEFAULT);
+                EphemeralCa::generate_with_cn("nono-session-ca", validity)
             };
             match ca_result.and_then(|ca| {
                 let ca = Arc::new(ca);

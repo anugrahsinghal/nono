@@ -86,6 +86,7 @@ pub(crate) struct ProxyLaunchOptions {
     pub(crate) allow_launch_services_active: bool,
     #[cfg(target_os = "macos")]
     pub(crate) trust_proxy_ca: bool,
+    pub(crate) proxy_ca_validity: Option<std::time::Duration>,
 }
 
 #[derive(Clone)]

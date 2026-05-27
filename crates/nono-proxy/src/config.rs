@@ -96,6 +96,12 @@ pub struct ProxyConfig {
     /// CLI supervisor; the cert is already trusted in the user's trust store.
     #[serde(default, skip)]
     pub preloaded_ca: Option<PreloadedCa>,
+
+    /// Optional CA validity override for TLS interception.
+    /// Default (`None`) uses `CA_VALIDITY_DEFAULT` (24h).
+    /// Set by CLI `--proxy-ca-validity` flag.
+    #[serde(default, skip)]
+    pub ca_validity: Option<std::time::Duration>,
 }
 
 /// Pre-generated CA key material for cross-session CA reuse.
@@ -140,6 +146,7 @@ impl Default for ProxyConfig {
             intercept_ca_dir: None,
             intercept_parent_ca_pems: None,
             preloaded_ca: None,
+            ca_validity: None,
         }
     }
 }

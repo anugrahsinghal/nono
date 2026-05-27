@@ -33,9 +33,9 @@ use std::time::{Duration, SystemTime};
 use time::OffsetDateTime;
 use zeroize::Zeroizing;
 
-/// Validity window for the ephemeral CA. Long enough to cover any plausible
-/// session, short enough to limit blast radius if the cert file leaks.
-const CA_VALIDITY: Duration = Duration::from_secs(24 * 60 * 60);
+/// Default validity window for the ephemeral CA (1 day). Long enough to cover
+/// any plausible session, short enough to limit blast radius if the cert file leaks.
+pub const CA_VALIDITY_DEFAULT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Ephemeral CA used to sign per-hostname leaf certificates for TLS interception.
 ///
@@ -60,6 +60,9 @@ pub struct EphemeralCa {
     cert_der: Vec<u8>,
     /// Cached PEM encoding of the public certificate.
     cert_pem: String,
+    /// CA certificate expiry. Leaf certificates are minted with this same
+    /// `not_after` so they never outlive the issuer.
+    not_after: SystemTime,
 }
 
 impl EphemeralCa {
@@ -107,27 +110,30 @@ impl EphemeralCa {
         // key, causing TLS handshake failures.
         validate_key_cert_binding(&key_pair, &cert_der)?;
 
+        let not_after = extract_not_after_from_der(&cert_der)?;
+
         Ok(Self {
             key_pair,
             key_pkcs8_der,
             ca_cert,
             cert_der,
             cert_pem: cert_pem.to_string(),
+            not_after,
         })
     }
 
-    /// Generate a fresh ephemeral CA with the default session CN.
+    /// Generate a fresh ephemeral CA with the default session CN and validity.
     ///
     /// All material is created in-memory; nothing is persisted.
     pub fn generate() -> Result<Self> {
-        Self::generate_with_cn("nono-session-ca")
+        Self::generate_with_cn("nono-session-ca", CA_VALIDITY_DEFAULT)
     }
 
-    /// Generate a fresh CA with a custom Common Name.
+    /// Generate a fresh CA with a custom Common Name and validity duration.
     ///
     /// Used by `--trust-proxy-ca` to create a CA with `CN=nono-proxy-ca` so
     /// it appears with a recognizable name in macOS Keychain and trust store.
-    pub fn generate_with_cn(cn: &str) -> Result<Self> {
+    pub fn generate_with_cn(cn: &str, validity: Duration) -> Result<Self> {
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|e| {
             ProxyError::Config(format!("failed to generate ephemeral CA key pair: {}", e))
         })?;
@@ -142,8 +148,9 @@ impl EphemeralCa {
         ];
 
         let now = SystemTime::now();
+        let not_after = now + validity;
         params.not_before = system_time_to_offset(now)?;
-        params.not_after = system_time_to_offset(now + CA_VALIDITY)?;
+        params.not_after = system_time_to_offset(not_after)?;
 
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, cn);
@@ -161,6 +168,7 @@ impl EphemeralCa {
             ca_cert,
             cert_der,
             cert_pem,
+            not_after,
         })
     }
 
@@ -216,6 +224,12 @@ impl EphemeralCa {
     pub(super) fn key_pair(&self) -> &KeyPair {
         &self.key_pair
     }
+
+    /// CA certificate expiry time. Leaf certs are minted with this same
+    /// `not_after` so they never outlive the issuer.
+    pub(super) fn not_after(&self) -> SystemTime {
+        self.not_after
+    }
 }
 
 impl std::fmt::Debug for EphemeralCa {
@@ -251,6 +265,25 @@ fn validate_key_cert_binding(key_pair: &KeyPair, cert_der: &[u8]) -> Result<()> 
         ));
     }
     Ok(())
+}
+
+/// Extract the `not_after` timestamp from a DER-encoded X.509 certificate.
+fn extract_not_after_from_der(cert_der: &[u8]) -> Result<SystemTime> {
+    use x509_parser::prelude::FromDer;
+
+    let (_, cert) = x509_parser::certificate::X509Certificate::from_der(cert_der).map_err(|e| {
+        ProxyError::Config(format!(
+            "failed to parse cert DER for not_after extraction: {e}"
+        ))
+    })?;
+    let not_after_epoch = cert.validity().not_after.timestamp();
+    let secs = u64::try_from(not_after_epoch).map_err(|_| {
+        ProxyError::Config(format!(
+            "CA certificate not_after is before Unix epoch (timestamp={not_after_epoch})"
+        ))
+    })?;
+    let not_after = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+    Ok(not_after)
 }
 
 /// Split a combined PEM bundle (PKCS#8 key + certificate) into DER key bytes
@@ -421,7 +454,7 @@ mod tests {
 
     #[test]
     fn split_key_cert_pem_roundtrips() {
-        let ca = EphemeralCa::generate_with_cn("nono-proxy-ca").unwrap();
+        let ca = EphemeralCa::generate_with_cn("nono-proxy-ca", CA_VALIDITY_DEFAULT).unwrap();
         let combined = format!("{}{}", &*ca.key_pem(), ca.cert_pem());
 
         let (key_der, cert_pem) = split_key_cert_pem(&combined).unwrap();

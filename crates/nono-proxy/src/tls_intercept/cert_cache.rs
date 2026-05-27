@@ -31,14 +31,9 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use time::OffsetDateTime;
 use tracing::{debug, warn};
-
-/// Validity window for minted leaf certificates. Short enough that even a
-/// stolen leaf becomes useless quickly; long enough that no plausible
-/// HTTP request will outlive it.
-const LEAF_VALIDITY: Duration = Duration::from_secs(60 * 60);
 
 /// Per-hostname leaf certificate cache backed by the session's [`EphemeralCa`].
 pub struct CertCache {
@@ -146,8 +141,14 @@ fn mint_leaf(ca: &EphemeralCa, hostname: &str) -> Result<Arc<CertifiedKey>> {
     params.use_authority_key_identifier_extension = true;
 
     let now = SystemTime::now();
+    let ca_not_after = ca.not_after();
+    if ca_not_after <= now {
+        return Err(ProxyError::Config(format!(
+            "CA certificate has expired; cannot mint leaf for '{hostname}'"
+        )));
+    }
     params.not_before = system_time_to_offset(now)?;
-    params.not_after = system_time_to_offset(now + LEAF_VALIDITY)?;
+    params.not_after = system_time_to_offset(ca_not_after)?;
 
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, hostname);
