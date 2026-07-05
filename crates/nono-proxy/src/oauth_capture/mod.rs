@@ -113,7 +113,19 @@ impl OAuthCaptureStore {
     }
 
     pub fn host_policy(&self, host_port: &str) -> Option<OAuthCaptureHostPolicy> {
-        let index = self.by_host.get(&host_port.to_lowercase())?.first()?;
+        let host_port = host_port.to_lowercase();
+        let index = if let Some(indexes) = self.by_host.get(&host_port) {
+            indexes.first()?
+        } else {
+            let host = host_from_host_port(&host_port)?;
+            self.by_host.iter().find_map(|(configured, indexes)| {
+                if host_from_host_port(configured) == Some(host) {
+                    indexes.first()
+                } else {
+                    None
+                }
+            })?
+        };
         Some(OAuthCaptureHostPolicy {
             route_id: format!("oauth.{}", self.endpoints[*index].provider),
             force_http1: true,
@@ -203,6 +215,10 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn host_from_host_port(host_port: &str) -> Option<&str> {
+    host_port.rsplit_once(':').map(|(host, _)| host)
 }
 
 impl NonceResolver for OAuthCaptureStore {
@@ -435,6 +451,20 @@ mod tests {
             .unwrap();
         let json: Value = serde_json::from_slice(&resolved).unwrap();
         assert_eq!(json["refresh_token"], "real-refresh");
+    }
+
+    #[test]
+    fn host_policy_matches_capture_host_on_any_port() {
+        let store = store();
+
+        assert!(store.host_policy("auth.openai.com:443").is_some());
+        assert!(store.host_policy("auth.openai.com:8443").is_some());
+        assert!(store.host_policy("other.openai.com:443").is_none());
+        assert!(
+            store
+                .lookup("auth.openai.com:8443", "/oauth/token")
+                .is_none()
+        );
     }
 
     #[test]

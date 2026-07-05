@@ -414,9 +414,9 @@ fn rewrite_http1_response(raw: &[u8], rewrite: ResponseRewrite<'_>) -> Result<Ve
     if chunked {
         body = decode_chunked_body(&body)?;
     }
-    if content_encoded && (200..300).contains(&status) {
+    if content_encoded {
         return Err(ProxyError::HttpParse(
-            "cannot safely rewrite content-encoded OAuth token response".to_string(),
+            "cannot safely rewrite or inspect content-encoded OAuth capture response".to_string(),
         ));
     }
 
@@ -495,5 +495,33 @@ mod tests {
         assert_eq!(parse_response_status(b""), 502);
         assert_eq!(parse_response_status(b"garbage"), 502);
         assert_eq!(parse_response_status(b"NOT-HTTP 200 OK"), 502);
+    }
+
+    #[test]
+    fn rewrite_http1_response_decodes_chunked_body_before_rewrite() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\n\r\n";
+        let rewritten = rewrite_http1_response(raw, &|_, _, body| {
+            assert_eq!(body, br#"{"a":1}"#);
+            Ok(br#"{"b":2}"#.to_vec())
+        })
+        .unwrap();
+
+        let text = std::str::from_utf8(&rewritten).unwrap();
+        assert!(text.contains("Content-Length: 7"));
+        assert!(!text.to_ascii_lowercase().contains("transfer-encoding"));
+        assert!(text.ends_with(r#"{"b":2}"#));
+    }
+
+    #[test]
+    fn rewrite_http1_response_rejects_content_encoded_body_for_all_statuses() {
+        let raw =
+            b"HTTP/1.1 400 Bad Request\r\nContent-Encoding: gzip\r\nContent-Length: 4\r\n\r\nxxxx";
+        let err = rewrite_http1_response(raw, &|_, _, body| Ok(body.to_vec())).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("content-encoded OAuth capture response"),
+            "unexpected error: {err}"
+        );
     }
 }

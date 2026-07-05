@@ -2,8 +2,8 @@ use super::StoredOAuthToken;
 use crate::error::{ProxyError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
@@ -103,13 +103,12 @@ pub(super) fn persist_tokens(
         ProxyError::Config(format!("failed to encode OAuth capture store: {err}"))
     })?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, raw).map_err(|err| {
+    write_owner_only_file(&tmp, &raw).map_err(|err| {
         ProxyError::Config(format!(
             "failed to write OAuth capture store '{}': {err}",
             tmp.display()
         ))
     })?;
-    set_owner_only_file(&tmp)?;
     fs::rename(&tmp, path).map_err(|err| {
         let _ = fs::remove_file(&tmp);
         ProxyError::Config(format!(
@@ -118,6 +117,21 @@ pub(super) fn persist_tokens(
         ))
     })?;
     set_owner_only_file(path)?;
+    Ok(())
+}
+
+fn write_owner_only_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let _ = fs::remove_file(path);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
     Ok(())
 }
 
