@@ -3719,7 +3719,10 @@ mod tests {
         let mut entry = test_capture_entry_no_cache(Vec::new());
         entry.provider = Some(crate::profile::CredentialCaptureProvider {
             command: vec![
-                "/bin/echo".to_string(),
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s' \"$1\"".to_string(),
+                "provider".to_string(),
                 r#"{"material":{"type":"headers","headers":{"Authorization":"Bearer provider"}}}"#
                     .to_string(),
             ],
