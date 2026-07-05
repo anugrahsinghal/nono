@@ -2,9 +2,7 @@ use super::Profile;
 use nono::{NonoError, Result};
 use serde::{Deserialize, Serialize};
 
-/// Declarative provider used by mediated credential routes. This is profile
-/// data, not a built-in Rust provider registry: packs and local profiles can
-/// define their own providers without changing nono.
+/// Declarative provider used by mediated credential routes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CredentialProviderDef {
