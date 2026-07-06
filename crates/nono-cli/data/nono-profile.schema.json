@@ -1389,7 +1389,7 @@
         "args": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Argument prefix matched against argv[1..]. An empty list is a catch-all and must be last."
+          "description": "Contiguous argument sequence matched within argv[1..]. An empty list is a catch-all and must be last. Broad single-argument rules such as [\"--force\"] match anywhere in the invocation, not only at the subcommand position."
         },
         "action": { "$ref": "#/$defs/InterceptActionConfig" }
       }
@@ -1490,7 +1490,7 @@
         "intercept": {
           "type": "array",
           "items": { "$ref": "#/$defs/InterceptRuleConfig" },
-          "description": "Ordered command argument-prefix intercept rules evaluated after invocation policy."
+          "description": "Ordered command argument-sequence intercept rules evaluated after invocation policy."
         },
         "allow_direct_exec_bypass": {
           "type": "array",
