@@ -28,6 +28,7 @@ pub(crate) struct PreparedProfile {
     pub(crate) credential_providers: HashMap<String, profile::CredentialProviderDef>,
     pub(crate) credential_routes: Vec<profile::CredentialRouteDef>,
     pub(crate) tls_intercept: Option<profile::TlsInterceptConfig>,
+    pub(crate) no_proxy: Vec<String>,
     pub(crate) upstream_proxy: Option<String>,
     pub(crate) upstream_bypass: Vec<String>,
     pub(crate) listen_ports: Vec<u16>,
@@ -831,6 +832,10 @@ fn prepare_profile_with_options(
         tls_intercept: loaded_profile
             .as_ref()
             .and_then(|profile| profile.network.tls_intercept.clone()),
+        no_proxy: loaded_profile
+            .as_ref()
+            .map(|profile| profile.network.no_proxy.clone())
+            .unwrap_or_default(),
         upstream_proxy: loaded_profile
             .as_ref()
             .and_then(|profile| profile.network.upstream_proxy.clone()),
