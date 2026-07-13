@@ -831,6 +831,11 @@
           "items": { "type": "integer" },
           "description": "TCP ports the sandboxed child may listen on."
         },
+        "no_proxy": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional client-side proxy bypass host patterns."
+        },
         "custom_credentials": {
           "type": "object",
           "additionalProperties": {

@@ -1046,6 +1046,45 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
+#[must_use = "network.no_proxy validation result must be handled"]
+fn validate_profile_no_proxy(profile: &Profile) -> Result<()> {
+    for entry in &profile.network.no_proxy {
+        nono_proxy::config::validate_no_proxy_entry(entry).map_err(|err| match err {
+            nono_proxy::ProxyError::Config(message) => NonoError::ProfileParse(format!(
+                "network.no_proxy entry '{entry}' is invalid: {message}"
+            )),
+            other => NonoError::ProfileParse(format!(
+                "network.no_proxy entry '{entry}' is invalid: {other}"
+            )),
+        })?;
+    }
+
+    validate_no_proxy_allow_domain_conflicts(
+        &profile.network.no_proxy,
+        &profile.network.allow_domain,
+    )
+}
+
+#[must_use = "network.no_proxy allow_domain conflict validation result must be handled"]
+pub(crate) fn validate_no_proxy_allow_domain_conflicts(
+    no_proxy: &[String],
+    allow_domain: &[AllowDomainEntry],
+) -> Result<()> {
+    for allow_entry in allow_domain {
+        let domain = allow_entry.domain();
+        for no_proxy_entry in no_proxy {
+            if nono_proxy::config::no_proxy_entry_overlaps_host_pattern(no_proxy_entry, domain) {
+                return Err(NonoError::ProfileParse(format!(
+                    "network.no_proxy entry '{no_proxy_entry}' conflicts with \
+                     network.allow_domain entry '{domain}': allow_domain traffic must \
+                     go through the proxy allowlist/L7 route, not bypass it"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_open_url_config(config: &OpenUrlConfig) -> Result<()> {
     for origin in &config.allow_origins {
         if origin.trim().is_empty() || origin.contains('\0') {
@@ -1524,6 +1563,15 @@ pub struct NetworkConfig {
     /// Equivalent to `--allow-connect-port` CLI flag.
     #[serde(default)]
     pub connect_port: Vec<u16>,
+    /// Additional client-side proxy bypass entries for generated
+    /// NO_PROXY/no_proxy in proxy mode.
+    ///
+    /// Entries are host patterns only: single-label local aliases, IP
+    /// literals, `*.example.com` wildcard suffixes, or `.example.com` suffix
+    /// patterns. Bare multi-label domains, broad DNS suffix labels, full URLs,
+    /// credentials, schemes, ports, paths, and catch-all `*` are rejected at load time.
+    #[serde(default)]
+    pub no_proxy: Vec<String>,
     /// Custom credential definitions for services not in network-policy.json.
     /// Keys are service names (used with `--credential`), values define
     /// how to route and inject credentials for that service.
@@ -2933,6 +2981,7 @@ pub(crate) fn finalize_profile(mut profile: Profile) -> Result<Profile> {
         return Err(NonoError::ProfileParse(err));
     }
     merge_implicit_default_groups(&mut profile)?;
+    validate_profile_no_proxy(&profile)?;
     validate_credential_capture_resolved(&profile)?;
     validate_credential_provider_resolved(&profile)?;
     validate_profile_tls_intercept(&profile)?;
@@ -3022,6 +3071,7 @@ pub(crate) fn parse_profile_bytes(content: &[u8]) -> Result<Profile> {
 
     // Validate custom credentials for security issues
     validate_profile_custom_credentials(&profile)?;
+    validate_profile_no_proxy(&profile)?;
     validate_credential_capture_entries(&profile)?;
     validate_credential_provider_entries(&profile)?;
     validate_profile_tls_intercept(&profile)?;
@@ -3435,6 +3485,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
             open_port: dedup_append(&base.network.open_port, &child.network.open_port),
             listen_port: dedup_append(&base.network.listen_port, &child.network.listen_port),
             connect_port: dedup_append(&base.network.connect_port, &child.network.connect_port),
+            no_proxy: dedup_append(&base.network.no_proxy, &child.network.no_proxy),
             // Child `Some([])` overrides parent credentials to empty (disables proxy).
             // Child `None` inherits parent credentials. Child `Some([...])` merges with parent.
             credentials: match child.network.credentials {

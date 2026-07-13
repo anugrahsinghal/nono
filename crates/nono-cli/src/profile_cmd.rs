@@ -1026,6 +1026,7 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
         || !net.resolved_credentials().is_empty()
         || !net.open_port.is_empty()
         || !net.listen_port.is_empty()
+        || !net.no_proxy.is_empty()
         || net.upstream_proxy.is_some()
         || !net.upstream_bypass.is_empty();
 
@@ -1080,6 +1081,13 @@ pub(crate) fn cmd_show(args: ProfileShowArgs) -> Result<()> {
                 "    {}: {}",
                 theme::fg("listen_port", t.subtext),
                 ports.join(", ")
+            );
+        }
+        if !net.no_proxy.is_empty() {
+            println!(
+                "    {}: {}",
+                theme::fg("no_proxy", t.subtext),
+                net.no_proxy.join(", ")
             );
         }
         if let Some(ref ep) = net.upstream_proxy {
@@ -1268,6 +1276,7 @@ fn profile_to_json(
         "credentials": profile.network.resolved_credentials(),
         "open_port": profile.network.open_port,
         "listen_port": profile.network.listen_port,
+        "no_proxy": profile.network.no_proxy,
         "upstream_proxy": profile.network.upstream_proxy,
         "upstream_bypass": profile.network.upstream_bypass,
     });
@@ -1522,6 +1531,7 @@ pub(crate) fn cmd_diff(args: ProfileDiffArgs) -> Result<()> {
             p1.network.resolved_credentials(),
             p2.network.resolved_credentials(),
         ),
+        ("no_proxy", &p1.network.no_proxy, &p2.network.no_proxy),
         (
             "upstream_bypass",
             &p1.network.upstream_bypass,
@@ -2052,6 +2062,10 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
             "upstream_bypass": diff_vec(
                 &p1.network.upstream_bypass,
                 &p2.network.upstream_bypass,
+            ),
+            "no_proxy": diff_vec(
+                &p1.network.no_proxy,
+                &p2.network.no_proxy,
             ),
             "custom_credentials": diff_custom_credentials_json(
                 &p1.network.custom_credentials,
