@@ -199,9 +199,14 @@ pub struct ProxyHandle {
     /// Routes whose credentials were unavailable are excluded so we
     /// don't inject phantom tokens that shadow valid external credentials.
     loaded_routes: std::collections::HashSet<String>,
-    /// Non-credential allowed hosts that should bypass the proxy (NO_PROXY).
-    /// Computed at startup: `allowed_hosts` minus credential upstream hosts.
+    /// Client-side proxy bypass entries appended after loopback defaults.
+    /// Computed at startup from direct-connect bypasses and profile-declared
+    /// `network.no_proxy` entries, excluding route upstreams.
     no_proxy_hosts: Vec<String>,
+    /// Canonical nono-owned bypass patterns for wrappers/SDKs that need to
+    /// translate profile intent to non-env proxy surfaces such as Java
+    /// `http.nonProxyHosts`.
+    canonical_no_proxy_hosts: Vec<String>,
     /// Path to the TLS-intercept trust bundle written at startup, when
     /// interception is active. The CLI passes this path to the sandboxed
     /// child via env vars (`SSL_CERT_FILE` etc.) and grants a Landlock /
@@ -299,7 +304,7 @@ impl ProxyHandle {
         // one) and only the deny-list / allowlist hostname rules apply.
         let upstream_reachable = |upstream: &str| -> bool {
             match crate::route::extract_host_port(upstream) {
-                Some(host_port) => {
+                Ok(host_port) => {
                     let host = host_port
                         .rsplit_once(':')
                         .map(|(h, _)| h)
@@ -308,7 +313,7 @@ impl ProxyHandle {
                 }
                 // Unparseable upstream can't be matched against the allowlist;
                 // keep it visible rather than silently hiding a misconfig.
-                None => true,
+                Err(_) => true,
             }
         };
 
@@ -343,11 +348,11 @@ impl ProxyHandle {
                 .iter()
                 .find(|r| r.credential_key.is_some() || r.oauth2.is_some() || r.aws_auth.is_some());
             let covering_cred = own_cred.copied().or_else(|| {
-                let host_port = crate::route::extract_host_port(upstream)?;
+                let host_port = crate::route::extract_host_port(upstream).ok()?;
                 config.routes.iter().find(|r| {
                     (r.credential_key.is_some() || r.oauth2.is_some() || r.aws_auth.is_some())
                         && crate::route::extract_host_port(&r.upstream)
-                            .is_some_and(|hp| crate::route::host_port_matches(&hp, &host_port))
+                            .is_ok_and(|hp| crate::route::host_port_matches(&hp, &host_port))
                 })
             });
             let cred_route = covering_cred.unwrap_or(group[0]);
@@ -430,33 +435,29 @@ impl ProxyHandle {
     pub fn env_vars(&self) -> Vec<(String, String)> {
         let proxy_url = format!("http://nono:{}@127.0.0.1:{}", *self.token, self.port);
 
-        // Build NO_PROXY: always include loopback, plus non-credential
-        // allowed hosts. Credential upstreams are excluded so their traffic
-        // goes through the reverse proxy for L7 filtering + injection.
-        let mut no_proxy_parts = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+        // Build NO_PROXY: always include loopback, plus startup-filtered
+        // bypass entries. Parent-shell NO_PROXY/no_proxy is intentionally not
+        // read here; proxy mode owns the child proxy env.
+        let mut no_proxy_parts = Vec::new();
+        let mut canonical_no_proxy_parts = Vec::new();
+        push_no_proxy_entry(&mut no_proxy_parts, "localhost");
+        push_no_proxy_entry(&mut no_proxy_parts, "127.0.0.1");
+        push_canonical_no_proxy_entry(&mut canonical_no_proxy_parts, "localhost");
+        push_canonical_no_proxy_entry(&mut canonical_no_proxy_parts, "127.0.0.1");
         for host in &self.no_proxy_hosts {
-            // Strip port for NO_PROXY (most HTTP clients match on hostname).
-            // Handle IPv6 brackets: "[::1]:443" → "[::1]", "host:443" → "host"
-            let hostname = if host.contains("]:") {
-                // IPv6 with port: split at "]:port"
-                host.rsplit_once("]:")
-                    .map(|(h, _)| format!("{}]", h))
-                    .unwrap_or_else(|| host.clone())
-            } else {
-                host.rsplit_once(':')
-                    .and_then(|(h, p)| p.parse::<u16>().ok().map(|_| h.to_string()))
-                    .unwrap_or_else(|| host.clone())
-            };
-            if !no_proxy_parts.contains(&hostname.to_string()) {
-                no_proxy_parts.push(hostname.to_string());
-            }
+            push_no_proxy_entry(&mut no_proxy_parts, host);
+        }
+        for host in &self.canonical_no_proxy_hosts {
+            push_canonical_no_proxy_entry(&mut canonical_no_proxy_parts, host);
         }
         let no_proxy = no_proxy_parts.join(",");
+        let nono_no_proxy = canonical_no_proxy_parts.join(",");
 
         let mut vars = vec![
             ("HTTP_PROXY".to_string(), proxy_url.clone()),
             ("HTTPS_PROXY".to_string(), proxy_url.clone()),
             ("NO_PROXY".to_string(), no_proxy.clone()),
+            ("NONO_NO_PROXY".to_string(), nono_no_proxy),
             ("NONO_PROXY_TOKEN".to_string(), self.token.to_string()),
         ];
 
@@ -562,6 +563,208 @@ impl Drop for ProxyHandle {
             }
         }
     }
+}
+
+fn merge_no_proxy_hosts(
+    smart_no_proxy_hosts: &[String],
+    profile_no_proxy: &[String],
+    route_hosts: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut merged = Vec::new();
+    for entry in smart_no_proxy_hosts {
+        if no_proxy_entry_matches_any_route(entry, route_hosts) {
+            debug!(
+                "Skipping smart no_proxy entry {:?}: it matches a proxy route upstream",
+                entry
+            );
+            continue;
+        }
+        push_no_proxy_entry(&mut merged, entry);
+    }
+
+    for entry in profile_no_proxy {
+        if no_proxy_entry_matches_any_route(entry, route_hosts) {
+            debug!(
+                "Skipping no_proxy entry {:?}: it matches a proxy route upstream",
+                entry
+            );
+            continue;
+        }
+        push_no_proxy_entry(&mut merged, entry);
+    }
+
+    merged
+}
+
+fn merge_canonical_no_proxy_hosts(
+    smart_no_proxy_hosts: &[String],
+    profile_no_proxy: &[String],
+    route_hosts: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut merged = Vec::new();
+    for entry in smart_no_proxy_hosts {
+        if no_proxy_entry_matches_any_route(entry, route_hosts) {
+            continue;
+        }
+        push_canonical_no_proxy_entry(&mut merged, entry);
+    }
+
+    for entry in profile_no_proxy {
+        if no_proxy_entry_matches_any_route(entry, route_hosts) {
+            continue;
+        }
+        push_canonical_no_proxy_entry(&mut merged, entry);
+    }
+
+    merged
+}
+
+#[must_use = "no_proxy proxy config validation result must be handled"]
+fn validate_no_proxy_config(config: &ProxyConfig) -> Result<()> {
+    for entry in &config.no_proxy {
+        crate::config::validate_no_proxy_entry(entry).map_err(|err| match err {
+            ProxyError::Config(message) => {
+                ProxyError::Config(format!("invalid no_proxy entry '{entry}': {message}"))
+            }
+            other => other,
+        })?;
+    }
+    validate_no_proxy_allowed_host_conflicts(&config.no_proxy, &config.allowed_hosts)
+}
+
+#[must_use = "no_proxy route conflict validation result must be handled"]
+fn validate_no_proxy_route_conflicts(
+    no_proxy: &[String],
+    route_hosts: &std::collections::HashSet<String>,
+) -> Result<()> {
+    for no_proxy_entry in no_proxy {
+        for route_host in route_hosts {
+            if no_proxy_entry_matches_route(no_proxy_entry, route_host) {
+                return Err(ProxyError::Config(format!(
+                    "no_proxy entry '{no_proxy_entry}' conflicts with route upstream '{route_host}': configured route traffic must go through the proxy, not bypass it"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[must_use = "no_proxy allowed_host conflict validation result must be handled"]
+fn validate_no_proxy_allowed_host_conflicts(
+    no_proxy: &[String],
+    allowed_hosts: &[String],
+) -> Result<()> {
+    for no_proxy_entry in no_proxy {
+        for allowed_host in allowed_hosts {
+            if crate::config::no_proxy_entry_overlaps_host_pattern(no_proxy_entry, allowed_host) {
+                return Err(ProxyError::Config(format!(
+                    "no_proxy entry '{no_proxy_entry}' conflicts with allowed_host '{allowed_host}': proxy-allowed traffic must go through the proxy filter, not bypass it"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn push_no_proxy_entry(entries: &mut Vec<String>, entry: &str) {
+    let env_entry = crate::config::normalise_no_proxy_env_entry(entry);
+    let normalised = crate::config::normalise_no_proxy_host_pattern(&env_entry);
+    if !entries
+        .iter()
+        .any(|existing| crate::config::normalise_no_proxy_host_pattern(existing) == normalised)
+    {
+        entries.push(env_entry);
+    }
+}
+
+fn push_canonical_no_proxy_entry(entries: &mut Vec<String>, entry: &str) {
+    let canonical = canonical_no_proxy_entry(entry);
+    let normalised = crate::config::normalise_no_proxy_host_pattern(&canonical);
+    if !entries
+        .iter()
+        .any(|existing| crate::config::normalise_no_proxy_host_pattern(existing) == normalised)
+    {
+        entries.push(canonical);
+    }
+}
+
+fn canonical_no_proxy_entry(entry: &str) -> String {
+    let host = crate::config::strip_no_proxy_port(entry);
+    let normalised = host.trim().to_ascii_lowercase();
+    if let Some(suffix) = normalised.strip_prefix("*.") {
+        format!("*.{suffix}")
+    } else {
+        crate::config::normalise_no_proxy_env_entry(&normalised)
+    }
+}
+
+fn smart_no_proxy_entry(host: &str) -> Option<String> {
+    let entry = crate::config::strip_no_proxy_port(host);
+    if entry.trim().to_ascii_lowercase().starts_with("*.") {
+        debug!(
+            "Skipping smart no_proxy entry {:?}: wildcard allowlist entries cannot be emitted without broadening to a bare-domain NO_PROXY bypass",
+            host
+        );
+        return None;
+    }
+    if crate::config::validate_no_proxy_entry(&entry).is_ok() {
+        Some(crate::config::normalise_no_proxy_env_entry(&entry))
+    } else {
+        debug!(
+            "Skipping smart no_proxy entry {:?}: unsafe or ambiguous NO_PROXY bypass semantics",
+            host
+        );
+        None
+    }
+}
+
+fn no_proxy_entry_matches_any_route(
+    entry: &str,
+    route_hosts: &std::collections::HashSet<String>,
+) -> bool {
+    route_hosts
+        .iter()
+        .any(|route_host| no_proxy_entry_matches_route(entry, route_host))
+}
+
+fn no_proxy_entry_matches_route(entry: &str, route_host_port: &str) -> bool {
+    let Some(route_host) = route_host_from_host_port(route_host_port) else {
+        return true;
+    };
+    crate::config::no_proxy_entry_overlaps_host_pattern(entry, route_host)
+}
+
+fn route_host_from_host_port(route_host_port: &str) -> Option<&str> {
+    if let Some(rest) = route_host_port.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host_end = end.checked_add(2)?;
+        let port = route_host_port[host_end..].strip_prefix(':')?;
+        if port.parse::<u16>().is_err() {
+            return None;
+        }
+        return Some(&route_host_port[..host_end]);
+    }
+
+    let (host, port) = route_host_port.rsplit_once(':')?;
+    if host.is_empty() || host.contains(':') || port.parse::<u16>().is_err() {
+        return None;
+    }
+    Some(host)
+}
+
+#[must_use]
+fn connect_target_from_normalized_authority(host_port: &str) -> Option<(String, u16)> {
+    if let Some(rest) = host_port.strip_prefix('[') {
+        let (host, remainder) = rest.split_once(']')?;
+        let port = remainder.strip_prefix(':')?.parse::<u16>().ok()?;
+        return Some((host.to_string(), port));
+    }
+
+    let (host, port) = host_port.rsplit_once(':')?;
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+    Some((host.to_string(), port.parse::<u16>().ok()?))
 }
 
 /// Shared state for the proxy server.
@@ -674,6 +877,20 @@ pub async fn start_with_nonce_resolver(
     credential_capture_backend: Option<Arc<dyn CredentialCaptureBackend>>,
     nonce_resolver: Option<Arc<dyn crate::token::NonceResolver>>,
 ) -> Result<ProxyHandle> {
+    validate_no_proxy_config(&config)?;
+
+    // Load route-level configuration (upstream, L7 filtering, custom TLS CA)
+    // for ALL routes, regardless of credential presence. This happens before
+    // binding so route/no_proxy conflicts fail configuration instead of being
+    // silently omitted from the generated environment.
+    let route_store = if config.routes.is_empty() {
+        RouteStore::empty()
+    } else {
+        RouteStore::load(&config.routes)?
+    };
+    let route_hosts = route_store.route_upstream_hosts();
+    validate_no_proxy_route_conflicts(&config.no_proxy, &route_hosts)?;
+
     // Use the caller-supplied password if one was provided (the standalone
     // `nono proxy --pass` case), otherwise mint a fresh random session token.
     // An empty override is treated as "not supplied" so a blank `--pass`
@@ -799,19 +1016,22 @@ pub async fn start_with_nonce_resolver(
     // adding them to NO_PROXY would cause clients to attempt direct
     // connections that the sandbox (Landlock / Seatbelt) denies.
     //
-    // Route upstreams are always excluded so their traffic goes through
-    // the proxy for L7 path filtering and/or credential injection.
+    // Route upstreams are always kept on the proxy path: explicit profile
+    // conflicts fail startup above, while smart-derived entries are filtered
+    // here because they are implementation details, not user-declared bypasses.
     //
-    // On macOS this MUST be empty regardless: Seatbelt's ProxyOnly mode
-    // blocks ALL direct outbound. See #580.
-    let no_proxy_hosts: Vec<String> = if cfg!(target_os = "macos") {
+    // On macOS the derived smart list MUST be empty: Seatbelt's ProxyOnly mode
+    // cannot infer arbitrary direct outbound bypasses. Explicit profile
+    // `network.no_proxy` entries are still merged below. They do not expand
+    // kernel permissions; direct attempts still fail closed unless the sandbox
+    // grants that destination (for example a loopback alias with an open port).
+    let smart_no_proxy_hosts: Vec<String> = if cfg!(target_os = "macos") {
         Vec::new()
     } else {
-        let route_hosts = route_store.route_upstream_hosts();
         config
             .allowed_hosts
             .iter()
-            .filter(|host| {
+            .filter_map(|host| {
                 let normalised = {
                     let h = host.to_lowercase();
                     if h.starts_with('[') {
@@ -827,8 +1047,8 @@ pub async fn start_with_nonce_resolver(
                         format!("{}:443", h)
                     }
                 };
-                if route_hosts.contains(&normalised) {
-                    return false;
+                if no_proxy_entry_matches_any_route(&normalised, &route_hosts) {
+                    return None;
                 }
                 // Only bypass the proxy if the sandbox grants direct
                 // TCP on this host's port (via --allow-connect-port).
@@ -836,14 +1056,23 @@ pub async fn start_with_nonce_resolver(
                     .rsplit_once(':')
                     .and_then(|(_, p)| p.parse::<u16>().ok())
                     .unwrap_or(443);
-                config.direct_connect_ports.contains(&port)
+                if config.direct_connect_ports.contains(&port) {
+                    smart_no_proxy_entry(host)
+                } else {
+                    None
+                }
             })
-            .cloned()
             .collect()
     };
 
+    let profile_no_proxy_hosts = config.no_proxy.as_slice();
+    let no_proxy_hosts =
+        merge_no_proxy_hosts(&smart_no_proxy_hosts, profile_no_proxy_hosts, &route_hosts);
+    let canonical_no_proxy_hosts =
+        merge_canonical_no_proxy_hosts(&smart_no_proxy_hosts, profile_no_proxy_hosts, &route_hosts);
+
     if !no_proxy_hosts.is_empty() {
-        debug!("Smart NO_PROXY bypass hosts: {:?}", no_proxy_hosts);
+        debug!("NO_PROXY bypass hosts: {:?}", no_proxy_hosts);
     }
 
     // Initialise TLS interception if a directory was supplied AND at least
@@ -950,6 +1179,7 @@ pub async fn start_with_nonce_resolver(
         shutdown_tx,
         loaded_routes,
         no_proxy_hosts,
+        canonical_no_proxy_hosts,
         intercept_ca_path,
         intercept_ca_env_vars,
         diagnostics: proxy_diagnostics,
@@ -1008,16 +1238,36 @@ async fn accept_loop(
 /// to 443 when absent. Handles IPv6 brackets: `[::1]:443` already has a port,
 /// `[::1]` needs the default, `host:443` has a port.
 fn normalize_authority(authority: &str) -> String {
-    if authority.starts_with('[') {
-        if authority.contains("]:") {
-            authority.to_lowercase()
-        } else {
-            format!("{}:443", authority.to_lowercase())
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some((host, remainder)) = rest.split_once(']') {
+            if remainder.is_empty() {
+                return crate::route::format_host_port(host, 443);
+            }
+            if let Some(port) = remainder.strip_prefix(':')
+                && let Ok(port) = port.parse::<u16>()
+            {
+                return crate::route::format_host_port(host, port);
+            }
         }
-    } else if authority.contains(':') {
         authority.to_lowercase()
     } else {
-        format!("{}:443", authority.to_lowercase())
+        if let Some((host, port)) = authority.rsplit_once(':')
+            && let Ok(port) = port.parse::<u16>()
+        {
+            if host.parse::<std::net::Ipv6Addr>().is_ok() {
+                return crate::route::format_host_port(host, port);
+            }
+            if !host.contains(':') {
+                return crate::route::format_host_port(host, port);
+            }
+        }
+        if authority.parse::<std::net::Ipv6Addr>().is_ok() {
+            crate::route::format_host_port(authority, 443)
+        } else if authority.contains(':') {
+            authority.to_lowercase()
+        } else {
+            crate::route::format_host_port(authority, 443)
+        }
     }
 }
 
@@ -1109,9 +1359,7 @@ async fn handle_connection(mut stream: tokio::net::TcpStream, state: &ProxyState
                             .as_ref()
                             .map(|policy| policy.route_id.as_str())
                     });
-                let (host, port) = host_port
-                    .rsplit_once(':')
-                    .map(|(h, p)| (h.to_string(), p.parse::<u16>().unwrap_or(443)))
+                let (host, port) = connect_target_from_normalized_authority(&host_port)
                     .unwrap_or_else(|| (host_port.clone(), 443));
 
                 let intercept_eligible = state.route_store.has_intercept_route(&host_port)
