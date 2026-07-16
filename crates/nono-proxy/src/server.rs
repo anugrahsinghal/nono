@@ -923,7 +923,7 @@ pub async fn start_with_nonce_resolver(
     let route_store = if config.routes.is_empty() {
         RouteStore::empty()
     } else {
-        RouteStore::load(&config.routes)?
+        RouteStore::load(&config.routes).await?
     };
     let route_hosts = route_store.route_upstream_hosts();
     validate_no_proxy_route_conflicts(&config.no_proxy, &route_hosts)?;
@@ -954,13 +954,6 @@ pub async fn start_with_nonce_resolver(
 
     info!("Proxy server listening on {}", local_addr);
 
-    // Load route-level configuration (upstream, L7 filtering, custom TLS CA)
-    // for ALL routes, regardless of credential presence.
-    let route_store = if config.routes.is_empty() {
-        RouteStore::empty()
-    } else {
-        RouteStore::load(&config.routes).await?
-    };
     let oauth_capture_store = OAuthCaptureStore::load_with_persistence(
         &config.oauth_capture,
         config.oauth_capture_store_path.clone(),
@@ -2075,8 +2068,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn normalize_authority_matches_ipv6_route_upstreams() -> Result<()> {
+    #[tokio::test]
+    async fn normalize_authority_matches_ipv6_route_upstreams() -> Result<()> {
         let routes = vec![crate::config::RouteConfig {
             prefix: "local".to_string(),
             upstream: "http://[::1]:8080/v1".to_string(),
@@ -2096,8 +2089,9 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
-        let store = RouteStore::load(&routes)?;
+        let store = RouteStore::load(&routes).await?;
         let host_port = normalize_authority("::1:8080");
 
         assert_eq!(host_port, "[::1]:8080");
@@ -2967,6 +2961,7 @@ mod tests {
                 ".internal.example".to_string(),
                 "::1".to_string(),
             ],
+            managed_loopback_upstream: false,
             canonical_no_proxy_hosts: vec![
                 "redis".to_string(),
                 "*.internal.example".to_string(),
@@ -3255,6 +3250,7 @@ mod tests {
             loaded_routes: ["myapi".to_string()].into_iter().collect(),
             no_proxy_hosts: Vec::new(),
             managed_loopback_upstream: false,
+            canonical_no_proxy_hosts: Vec::new(),
             intercept_ca_path: None,
             intercept_ca_env_vars: crate::config::default_intercept_ca_env_vars(),
             diagnostics: vec![],
@@ -3759,6 +3755,7 @@ mod tests {
                 tls_client_key: None,
                 oauth2: None,
                 aws_auth: None,
+                spiffe: None,
             }],
             ..Default::default()
         };
@@ -3802,6 +3799,7 @@ mod tests {
                 tls_client_key: None,
                 oauth2: None,
                 aws_auth: None,
+                spiffe: None,
             }],
             ..Default::default()
         };
@@ -3869,6 +3867,7 @@ mod tests {
                 tls_client_key: None,
                 oauth2: None,
                 aws_auth: None,
+                spiffe: None,
             }],
             ..Default::default()
         };
@@ -3906,6 +3905,7 @@ mod tests {
                 tls_client_key: None,
                 oauth2: None,
                 aws_auth: None,
+                spiffe: None,
             }],
             ..Default::default()
         };
@@ -3945,13 +3945,13 @@ mod tests {
                 tls_client_key: None,
                 oauth2: None,
                 aws_auth: None,
+                spiffe: None,
             }],
             ..Default::default()
         };
         let message = start_config_error(config).await?;
         assert!(message.contains("no_proxy entry '*.example.net' conflicts with route upstream"));
         assert!(message.contains("*.dev.example.net:443"));
-        Ok(())
         Ok(())
     }
 

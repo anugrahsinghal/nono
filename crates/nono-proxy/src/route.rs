@@ -454,7 +454,7 @@ impl RouteStore {
 pub fn config_has_loopback_proxy_route(routes: &[RouteConfig]) -> bool {
     routes.iter().any(|route| {
         let loopback =
-            extract_host_port(&route.upstream).is_some_and(|hp| is_loopback_host_port(&hp));
+            extract_host_port(&route.upstream).is_ok_and(|hp| is_loopback_host_port(&hp));
         if !loopback {
             return false;
         }
@@ -1126,8 +1126,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_route_store_matches_bracketed_ipv6_authority() -> Result<()> {
+    #[tokio::test]
+    async fn test_route_store_matches_bracketed_ipv6_authority() -> Result<()> {
         let routes = vec![RouteConfig {
             prefix: "local".to_string(),
             upstream: "http://[::1]:8080/v1".to_string(),
@@ -1147,9 +1147,10 @@ mod tests {
             tls_client_key: None,
             oauth2: None,
             aws_auth: None,
+            spiffe: None,
         }];
 
-        let store = RouteStore::load(&routes)?;
+        let store = RouteStore::load(&routes).await?;
 
         assert!(store.route_upstream_hosts().contains("[::1]:8080"));
         assert!(store.is_route_upstream("[::1]:8080"));
@@ -1162,8 +1163,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_load_routes_rejects_malformed_or_unsupported_upstreams() {
+    #[tokio::test]
+    async fn test_load_routes_rejects_malformed_or_unsupported_upstreams() {
         for upstream in [
             "not a url",
             "ftp://api.openai.com",
@@ -1189,10 +1190,11 @@ mod tests {
                 tls_client_key: None,
                 oauth2: None,
                 aws_auth: None,
+                spiffe: None,
             }];
 
             assert!(
-                RouteStore::load(&routes).is_err(),
+                RouteStore::load(&routes).await.is_err(),
                 "route upstream {upstream:?} must fail closed at load time"
             );
         }
